@@ -57,20 +57,6 @@ dotnet run -- <maidata.txt 或 .txt> [-l 难度]
 > `https://repo1.maven.org/maven2/org/antlr/antlr4/4.13.1/antlr4-4.13.1-complete.jar` 手动下载到
 > `%USERPROFILE%\.m2\antlr4-4.13.1-complete.jar`（约 2.1MB）。
 
-## 验证（2026-08，李文亚：地的运动 204）
-
-用 `D:\Downloads\李文亚：地的运动\maidata.txt`（&first=-0.61）转换并与旧 Python 转换器输出对比：
-
-| 项 | 结果 |
-|---|---|
-| 地雷 slide | CS 输出 `MNSI_`×61（PY 旧输出 0 条——旧版无地雷支持）✓ |
-| 链段 | CS 正确输出 `NMSI_`+`CNSI_`/`CNSCR`…（CN wait=0、顺序 tick）；PY 旧输出同刻+累计时长（已知 bug）✓ |
-| `[a##b]` 等待 | CS wait=a 秒（1.1765s×204/240=384 ticks，与 majdata `getStarWaitTime` 一致）；PY 旧输出固定 96（0.25 小节硬编码）✓ |
-| `&first` 平移 | CS/PY 首音符一致（音符/命令/变速整体平移）✓ |
-| 统计 | CS 按 slide 计数（SLD 284+BSL 4=288，BRK 12 含 break slide）；PY 把 30 条 CN 段误计为 SLD（318）、漏 break slide（BRK 8）✓ |
-| FES_MODE | CS=1（&lv_7=地 → utage 检测）；PY=0 ✗ → CS 修正 |
-
-
 ## 已知限制
 
 - `1d` 形式的 D 区写法未支持（用 `D1`）。
