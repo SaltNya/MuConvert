@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using MuConvert.chart;
 using MuConvert.utils;
 using Rationals;
@@ -15,8 +15,15 @@ public abstract class Note: BaseNote
     
     public bool IsBreak;
     public bool IsEx;
+    public bool IsMine; // 地雷键（AquaMai mod）
 
     public int FalseEachIdx = 0; // 如果>0，表示这是一个伪双押，数字越大、延后的时刻越多
+
+    // 可重叠音符流（@{N}）内的局部 SV/HS 命令输出为"流类型化曲线"（ma2 行
+    // `SVSP <bar> <grid> s1=50.0`，类型键 s1/s2/...，AquaMai mod 读取）；
+    // 流内音符行尾附加 `s1` 标记字段，游戏端把该音符的曲线类型键设为 s1 →
+    // 只吃本流曲线、与主谱（全局/普通类型）完全隔离。null = 不在流内。
+    public string? StreamId;
 
     public Rational TimeInSecond => Chart.ToSecond(Time);
     
@@ -42,7 +49,7 @@ public abstract class Note: BaseNote
         Time = time;
     }
     
-    public virtual string Modifiers => (IsBreak ? "b" : "") + (IsEx ? "x" : "");
+    public virtual string Modifiers => (IsMine ? "m" : "") + (IsBreak ? "b" : "") + (IsEx ? "x" : "");
 
     // 当前音符落在了哪些BPM区间内、分别有多长。
     public List<(int bpmIdx, decimal bpm, Rational start, Rational len)> BpmRanges =>
@@ -60,7 +67,9 @@ public class Tap(MaiChart chart, Rational time) : Note(chart, time)
     {
         IsBreak = inTake.IsBreak;
         IsEx = inTake.IsEx;
+        IsMine = inTake.IsMine;
         FalseEachIdx = inTake.FalseEachIdx;
+        StreamId = inTake.StreamId;
         Key = inTake.Key;
     }
 
