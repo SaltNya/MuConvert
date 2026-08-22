@@ -65,7 +65,14 @@ GENERATED_BY	MuConvert v{8}
     protected virtual MA2Line? AddTap(Tap tap, int bar, int tick)
     {
         var prefix = "NM";
-        if (tap.IsBreak && tap.IsEx) prefix = "BX";
+        if (tap.IsMine)
+        { // 地雷键（AquaMai mod）：MN=普通 MB=绝赞 MX=EX MZ=EX绝赞
+            if (tap.IsEx && tap.IsBreak) prefix = "MZ";
+            else if (tap.IsBreak) prefix = "MB";
+            else if (tap.IsEx) prefix = "MX";
+            else prefix = "MN";
+        }
+        else if (tap.IsBreak && tap.IsEx) prefix = "BX";
         else if (tap.IsBreak) prefix = "BR";
         else if (tap.IsEx) prefix = "EX";
         var name = tap is Star ? "STR" : "TAP";
@@ -76,7 +83,19 @@ GENERATED_BY	MuConvert v{8}
             name = "HLD";
             extra = T(hold.Duration.Bar, -hold.FalseEachIdx).ToString();
         } 
-        return new MA2Line(prefix + name, bar, tick, tap.Key - 1, extra);
+        return AppendStreamId(new MA2Line(prefix + name, bar, tick, tap.Key - 1, extra), tap);
+    }
+
+    // 重叠流内的音符行尾附加所属流类型键（ma2 行尾 s{N} 字段，AquaMai mod 读取：
+    // 该音符的曲线类型键 = s{N}，只吃本流的 `SVSP/HS ... s{N}=...` 类型化曲线，
+    // 与主谱全局/普通类型曲线完全隔离）。流内变速由曲线驱动，不再内嵌单点倍率。
+    protected MA2Line AppendStreamId(MA2Line line, Note note)
+    {
+        if (!string.IsNullOrEmpty(note.StreamId))
+        {
+            line = line with { Extra = line.Extra.Length > 0 ? line.Extra + "\t" + note.StreamId : note.StreamId };
+        }
+        return line;
     }
 
     private HashSet<string> _broadTap = ["TAP", "HLD", "STR", "BRK", "XTP", "XHO", "BST", "XST"];
@@ -96,6 +115,11 @@ GENERATED_BY	MuConvert v{8}
     protected virtual List<MA2Line> AddSlide(Slide slide, int bar, int tick)
     {
         List<MA2Line> result = [];
+
+        // 自定义 slide（任一端点是 touch 区，AquaMai mod）：NMSSS/BRSSS/MNSSS/MBSSS + 星头
+        if (slide.StartArea != "" || slide.segments.Any(s => s.EndArea != ""))
+            return AddCustomSlide(slide, bar, tick);
+
         if (slide.OwnHead != null)
         {
             var headTap = AddTap(slide.OwnHead, bar, tick);
@@ -147,7 +171,14 @@ GENERATED_BY	MuConvert v{8}
             var prefix = "NM";
             if (segIdx == 0)
             {
-                if (slide.IsBreak) prefix = "BR";
+                if (slide.IsMine)
+                { // 地雷slide：MN=普通 MB=绝赞 MZ=EX绝赞
+                    if (slide.IsEx && slide.IsBreak) prefix = "MZ";
+                    else if (slide.IsBreak) prefix = "MB";
+                    else prefix = "MN";
+                }
+                else if (slide.IsEx && slide.IsBreak) prefix = "BX";
+                else if (slide.IsBreak) prefix = "BR";
                 waitTime = T(slide.WaitTime.Bar, -slide.FalseEachIdx);
             }
             else prefix = "CN";
@@ -164,9 +195,132 @@ GENERATED_BY	MuConvert v{8}
         return result;
     }
 
+    /**
+     * 自定义 slide（任一端点是 touch 区，AquaMai mod）：NMSSS/BRSSS/MNSSS/MBSSS。
+     * 行格式：TAG\tbar\tgrid\tstart\twait\tshoot\tend\tcode；星头由转换器输出
+     * （按键环起点=NMSTR/MNSTR/BRSTR/MBSTR，touch区起点=NMSTP/BRSTP/MNTTP/MBTTP）。
+     * 同头slide只有树根输出星头。
+     */
+    protected virtual List<MA2Line> AddCustomSlide(Slide slide, int bar, int tick)
+    {
+        List<MA2Line> result = [];
+        var tag = (slide.IsMine, slide.IsBreak) switch
+        {
+            (false, false) => "NMSSS",
+            (true, false) => "MNSSS",
+            (false, true) => "BRSSS",
+            (true, true) => "MBSSS",
+        };
+
+        // 同头slide只有树根输出星头；无头（?/!）不输出星头（按键起点去NMSTR，touch区起点去touchstar）
+        if (slide.SharedHeadWith == null && !slide.NoHead)
+        {
+            if (slide.StartArea == "")
+            {
+                var headName = (slide.IsMine, slide.IsBreak) switch
+                {
+                    (false, false) => "NMSTR",
+                    (true, false) => "MNSTR",
+                    (false, true) => "BRSTR",
+                    (true, true) => "MBSTR",
+                };
+                result.Add(new MA2Line(headName, bar, tick, slide.Key - 1));
+            }
+            else
+            {
+                var headTag = tag switch
+                {
+                    "NMSSS" => "NMSTP",
+                    "BRSSS" => "BRSTP",
+                    "MNSSS" => "MNTTP",
+                    _ => "MBTTP",
+                };
+                var key = slide.StartArea != "C" ? slide.Key - 1 : 0;
+                result.Add(new MA2Line(headTag, bar, tick, key, $"{slide.StartArea}\t0\tM1"));
+            }
+        }
+
+        var code = BuildSlideCode(slide);
+        if (code == null)
+        {
+            Warn("该slide含无法用自定义slide code表达的形状（v/w等），已跳过", slide);
+            return result;
+        }
+
+        result.Add(new MA2Line(tag, bar, tick, slide.Key - 1,
+            $"{T(slide.WaitTime.Bar)}\t{T(slide.Duration.Bar)}\t{slide.EndKey - 1}\t{code}"));
+        return result;
+    }
+
+    /// <summary>把1-indexed键位编码为自定义slide code的位置文本（""=按键环数字，C=中心，其余=字母+数字）。</summary>
+    private static string EncPos(string area, int key1)
+    {
+        return area switch
+        {
+            "" => key1.ToString(),
+            "C" => "C",
+            _ => area + key1,
+        };
+    }
+
+    /// <summary>V折线的反射点：SLL=起点逆时针2格，SLR=顺时针2格。</summary>
+    private static int ReflectKey(int startKey1, int delta) => (startKey1 - 1 + delta + 8) % 8 + 1;
+
+    /// <summary>生成自定义slide code（移植自MaiConverter的slide_to_code/merge_chain_code）。
+    /// 单段：start+body+K+终点；多段：每段body带节点、最后K+终点。w/v无法表达返回null。</summary>
+    private string? BuildSlideCode(Slide slide)
+    {
+        if (slide.segments.Count == 1)
+        {
+            var seg = slide.segments[0];
+            var start = EncPos(slide.StartArea, slide.Key);
+            var end = EncPos(seg.EndArea, seg.EndKey);
+            var isAEnd = seg.EndArea == "";
+            string? body = seg.Type switch
+            {
+                SlideType.SI_ or SlideType.SSL or SlideType.SSR => isAEnd ? "" : end,
+                SlideType.SCL => "<" + end,
+                SlideType.SCR => ">" + end,
+                SlideType.SUL or SlideType.SXL => ">" + end,
+                SlideType.SUR or SlideType.SXR => "<" + end,
+                SlideType.SV_ or SlideType.SF_ => null, // v/w 无法表达
+                SlideType.SLL => ReflectKey(slide.Key, -2) + end,
+                SlideType.SLR => ReflectKey(slide.Key, 2) + end,
+                _ => null,
+            };
+            if (body == null) return null;
+            return start + body + "K" + (isAEnd ? seg.EndKey.ToString() : seg.EndArea);
+        }
+
+        // 多段链：段间必须显式写节点
+        var sb = new StringBuilder(EncPos(slide.StartArea, slide.Key));
+        foreach (var seg in slide.segments)
+        {
+            var end = EncPos(seg.EndArea, seg.EndKey);
+            string? body = seg.Type switch
+            {
+                SlideType.SI_ or SlideType.SSL or SlideType.SSR => end,
+                SlideType.SCL => "<" + end,
+                SlideType.SCR => ">" + end,
+                SlideType.SUL or SlideType.SXL => ">" + end,
+                SlideType.SUR or SlideType.SXR => "<" + end,
+                SlideType.SV_ or SlideType.SF_ => null,
+                SlideType.SLL => ReflectKey(seg.StartKey, -2) + end,
+                SlideType.SLR => ReflectKey(seg.StartKey, 2) + end,
+                _ => null,
+            };
+            if (body == null) return null;
+            sb.Append(body);
+        }
+
+        var last = slide.segments[^1];
+        sb.Append('K');
+        sb.Append(last.EndArea == "" ? last.EndKey.ToString() : last.EndArea);
+        return sb.ToString();
+    }
+
     protected virtual MA2Line? AddTouch(Touch touch, int bar, int tick)
     {
-        const string prefix = "NM"; // touch目前只有normal的
         var name = "TTP";
         List<string> extras = [];
         if (touch is TouchHold th)
@@ -181,8 +335,13 @@ GENERATED_BY	MuConvert v{8}
         extras.Add(touch.IsFirework ? "1" : "0");
         extras.Add(touch.TouchSize);
         
-        if (touch.IsBreak || touch.IsEx) Warn(Locale.SpecialTouchIn105, touch);
-        return new MA2Line(prefix + name, bar, tick, key, string.Join("\t", extras));
+        // AquaMai mod：地雷touch=MNTTP/MNTHO，绝赞touch=BRTTP/BRTHO（kansen），地雷绝赞=MBTTP/MBTHO
+        var prefix = "NM";
+        if (touch.IsMine && touch.IsBreak) prefix = "MB";
+        else if (touch.IsMine) prefix = "MN";
+        else if (touch.IsBreak) prefix = "BR";
+        else if (touch.IsEx) Warn(Locale.SpecialTouchIn105, touch);
+        return AppendStreamId(new MA2Line(prefix + name, bar, tick, key, string.Join("\t", extras)), touch);
     }
 
     // 生成文件头
@@ -205,6 +364,27 @@ GENERATED_BY	MuConvert v{8}
             result.AppendLine(FormattableString.Invariant($"BPM\t{bar}\t{tick}\t{bpm.Bpm:F3}"));
         }
         result.AppendLine($"MET\t0\t0\t4\t{chart.ClockCount}");
+        result.AppendLine();
+    }
+
+    // 生成时间轴命令段（AquaMai mod）：SVSP/HS/BOUNCE/SPAWN
+    protected void GenerateCommands(StringBuilder result)
+    {
+        if (chart.Commands.Count == 0) return;
+        foreach (var cmd in chart.Commands.OrderBy(c => c.Time))
+        {
+            string? tag = cmd.Kind switch
+            {
+                "sv" => "SVSP",
+                "hs" => "HS",
+                "bounce" => "BOUNCE",
+                "spawn" => "SPAWN",
+                _ => null,
+            };
+            if (tag == null) continue;
+            var (bar, tick) = BT(cmd.Time);
+            result.AppendLine($"{tag}\t{bar}\t{tick}\t{cmd.Value}");
+        }
         result.AppendLine();
     }
 
@@ -312,6 +492,7 @@ GENERATED_BY	MuConvert v{8}
         
         GenerateFileHead(result);
         GenerateBPM(result);
+        GenerateCommands(result);
         GenerateNotes(result);
         GenerateStatistics(result, chart.Statistics);
         
@@ -323,6 +504,27 @@ GENERATED_BY	MuConvert v{8}
         ["BRTTP"] = "NMTTP", ["EXTTP"] = "NMTTP", ["BXTTP"] = "NMTTP",
         ["BRTHO"] = "NMTHO", ["EXTHO"] = "NMTHO", ["BXTHO"] = "NMTHO",
         ["EXSLD"] = "NMSLD", ["BXSLD"] = "BRSLD",
+        // 地雷键（AquaMai mod）：判定类别与普通相同
+        ["MNTAP"] = "NMTAP", ["MBTAP"] = "BRTAP", ["MXTAP"] = "EXTAP", ["MZTAP"] = "BXTAP",
+        ["MNHLD"] = "NMHLD", ["MBHLD"] = "BRHLD", ["MXHLD"] = "EXHLD", ["MZHLD"] = "BXHLD",
+        ["MNSTR"] = "NMSTR", ["MBSTR"] = "BRSTR", ["MXSTR"] = "EXSTR", ["MZSTR"] = "BXSTR",
+        ["MNTTP"] = "NMTTP", ["MBTTP"] = "BRTTP", ["MNTHO"] = "NMTHO", ["MBTHO"] = "BRTHO",
+        ["MNSSS"] = "NMSLD", ["MBSSS"] = "BRSLD",
+        ["MNSLD"] = "NMSLD", ["MBSLD"] = "BRSLD", ["MXSLD"] = "EXSLD", ["MZSLD"] = "BXSLD",
+        ["MNSI_"] = "NMSLD", ["MBSI_"] = "BRSLD",
+        ["MNSCL"] = "NMSLD", ["MBSCL"] = "BRSLD",
+        ["MNSCR"] = "NMSLD", ["MBSCR"] = "BRSLD",
+        ["MNSUL"] = "NMSLD", ["MBSUL"] = "BRSLD",
+        ["MNSUR"] = "NMSLD", ["MBSUR"] = "BRSLD",
+        ["MNSXL"] = "NMSLD", ["MBSXL"] = "BRSLD",
+        ["MNSXR"] = "NMSLD", ["MBSXR"] = "BRSLD",
+        ["MNSLL"] = "NMSLD", ["MBSLL"] = "BRSLD",
+        ["MNSLR"] = "NMSLD", ["MBSLR"] = "BRSLD",
+        ["MNSSL"] = "NMSLD", ["MBSSL"] = "BRSLD",
+        ["MNSSR"] = "NMSLD", ["MBSSR"] = "BRSLD",
+        ["MNSV_"] = "NMSLD", ["MBSV_"] = "BRSLD",
+        ["MNSF_"] = "NMSLD", ["MBSF_"] = "BRSLD",
+        ["NMSSS"] = "NMSLD", ["BRSSS"] = "BRSLD",
     };
 
     protected virtual Dictionary<string, string> statsNameConversion() => new()
