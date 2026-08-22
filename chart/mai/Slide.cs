@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using MuConvert.utils;
 using Rationals;
 
@@ -14,6 +14,7 @@ public class Star : Tap
 /**
  * 一个Slide表示一整根星星，包括1-3-5-7这种分段fes星星。但不包括1-3*-5这种同头星星，同头星星会被表示成两个slide。
  * 对于同头星星，仅有第一根设置Head属性，后面的星星不设置Head属性但设置SharedHeadWith指向第一根。
+ * StartArea/EndArea（""=按键环，A/B/C/D/E=touch区）用于AquaMai mod的NMSSS自定义slide。
  */
 [DebuggerDisplay("{DebuggerDisplay(),nq}")]
 public class Slide : Note
@@ -25,8 +26,11 @@ public class Slide : Note
     } 
     // PS: 根据simai语法，星星头既可以是普通的星星形状(1-5)，也可以是Tap形状的(1@-5)，也可以没有(1?-5或1!-5)
     public Slide? SharedHeadWith;
+    public bool NoHead; // 无头标记（? / !）：按键起点=去星头但保留Key；touch区起点=不输出touchstar
+    public string StartArea = ""; // 起点区域：""=按键环，A/B/C/D/E=touch区（B1-5这种）
     public List<SlideSegment> segments = new();
     public Duration WaitTime;
+    internal int startKeyOverride = -1; // 链段续写（*5-3 带显式起点键）的段起点；-1=未指定（同头 *-6 起点=星头键）
 
     public Slide(MaiChart chart, Rational time) : base(chart, time)
     {
@@ -39,15 +43,15 @@ public class Slide : Note
         set
         {
             Utils.Assert(OwnHead == null && SharedHeadWith?.Key == null, "尝试为有头星星手动设置星星头");
-            if (value < 1 || value > 8) throw new ArgumentException(string.Format(Locale.InvalidKey, value));
-            _key = value;
+            if (value < 0 || value > 8) throw new ArgumentException(string.Format(Locale.InvalidKey, value));
+            _key = value; // 允许0：C区起点
         }
     }
     
     // 所有的SharedHeadWith的连接关系，会构成一棵树，其中只有树根节点有OwnHead且SharedHeadWith为null。
     public Slide SharedHeadWithRoot => SharedHeadWith != null ? SharedHeadWith.SharedHeadWithRoot : this;
 
-    public int EndKey => segments.Count > 0 ? segments.Last().EndKey : Key;
+    public int EndKey => startKeyOverride >= 0 ? startKeyOverride : (segments.Count > 0 ? segments.Last().EndKey : Key);
     
     public override Duration Duration
     {
@@ -105,6 +109,7 @@ public class SlideSegment(Slide slide)
 {
     public SlideType Type;
     public int EndKey;
+    public string EndArea = ""; // ""=按键环，A/B/C/D/E=touch区
     public Duration? Duration;
     
     public int StartKey
@@ -112,7 +117,17 @@ public class SlideSegment(Slide slide)
         get
         {
             var idx = slide.segments.IndexOf(this);
-            return idx > 0 ? slide.segments[idx-1].EndKey : slide.Key;
+            if (idx > 0) return slide.segments[idx-1].EndKey;
+            return slide.startKeyOverride >= 0 ? slide.startKeyOverride : slide.Key;
+        }
+    }
+
+    public string StartArea
+    {
+        get
+        {
+            var idx = slide.segments.IndexOf(this);
+            return idx > 0 ? slide.segments[idx-1].EndArea : slide.StartArea;
         }
     }
 }
