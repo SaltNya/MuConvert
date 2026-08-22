@@ -19,7 +19,15 @@ public static class Utils
         return new Exception(string.Format(Locale.AssertionFailed, msg));
     }
     
-    public static string AppVersion => Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion[..^33] ?? "unknown";
+    public static string AppVersion
+    {
+        get
+        {
+            var v = Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
+            var plus = v.IndexOf('+');
+            return plus >= 0 ? v[..plus] : v; // 去掉 MinVer 附加的 +<sha> 后缀
+        }
+    }
 
     public static void SetLocale(CultureInfo culture) => Locale.Culture = culture;
 
