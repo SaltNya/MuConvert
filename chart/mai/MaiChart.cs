@@ -1,10 +1,17 @@
 using MuConvert.chart;
+using Rationals;
 
 namespace MuConvert.mai;
 
 public class MaiChart: BaseChart<Note>
 {
     public string DefaultTouchSize = "M1";
+
+    /**
+     * 时间轴命令（AquaMai mod）：<SV*2>、<HS*1.2>、<BOUNCE*8:1>、<SPAWN*1.225> 等。
+     * Kind 为小写（sv/hs/bounce/spawn），Value 为 * 号后的原文。
+     */
+    public List<(Rational Time, string Kind, string Value)> Commands = [];
 
     /**
      * 获得谱面开始的时刻（即谱面中第一个音符的开始时刻）。
@@ -25,5 +32,16 @@ public class MaiChart: BaseChart<Note>
     protected override IEnumerable<Note> SortNotes()
     {
         return Notes.OrderBy(note => note.Time).ThenBy(n=>n.FalseEachIdx);
+    }
+
+    /// <summary>整体平移时，时间轴命令（SV/HS/BOUNCE/SPAWN）也要跟着平移。</summary>
+    public override void Shift(Rational offset, decimal? bpm = null)
+    {
+        var realOffset = _calcOffsetForShift(offset, bpm ?? StartBpm);
+        base.Shift(offset, bpm);
+        Commands = Commands
+            .Select(c => (Time: c.Time + realOffset, Kind: c.Kind, Value: c.Value))
+            .Where(c => c.Time >= 0)
+            .ToList();
     }
 }
