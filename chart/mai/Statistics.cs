@@ -30,6 +30,12 @@ public class Statistics
         {
             type = "SLD";
             if (slide.OwnHead != null) AddNote(slide.OwnHead);
+            else if (slide.SharedHeadWith == null && slide.StartArea != "")
+            { // 自定义slide的touchstar头（NMSTP/BRSTP/MNTTP/MBTTP）：按TTP计入
+                var touchStar = new Touch(slide.Chart, slide.Time);
+                touchStar.TouchArea = slide.Key == 0 ? slide.StartArea : slide.StartArea + slide.Key;
+                AddNote(touchStar);
+            }
         }
         else throw Utils.Fail();
 
