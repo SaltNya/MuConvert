@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 using MuConvert.chu;
 using MuConvert.mai;
 using MuConvert.utils;
+using Rationals;
 
 namespace MuConvert;
 
@@ -221,6 +222,7 @@ internal static class Program
 
         var inputDir = Path.GetDirectoryName(Path.GetFullPath(inputPath))!;
         var text = File.ReadAllText(inputPath, Encoding.UTF8);
+        if (text.Length > 0 && text[0] == '\uFEFF') text = text[1..]; // 去掉UTF-8 BOM
 
         var targetFormat = _cliTargetNormalized ?? "ma2";
         if (targetFormat != "ma2") throw new ArgumentException($"不支持的输出类型「{targetFormat}」。输入文件为simai时，输出格式仅支持ma2。");
@@ -396,7 +398,7 @@ internal static class Program
             var chartInfo = maidata.Levels[id];
             var bigTouch = id is 2 or 3;
             var isUtage = IsUtageFromLevelString(chartInfo.Level);
-            var ma2 = SimaiToMa2(chartInfo.Inote, maidata.ClockCount, bigTouch, isUtage, _simaiStrictLevel);
+            var ma2 = SimaiToMa2(chartInfo.Inote, maidata.ClockCount, bigTouch, isUtage, _simaiStrictLevel, maidata.First);
             if (_outputSpec.Kind == OutputSinkKind.Stdout) Console.Out.Write(ma2);
             else File.WriteAllText(outPath, ma2, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         }
@@ -515,9 +517,16 @@ internal static class Program
     }
 
     private static string SimaiToMa2(string inote, int clockCount = 4, bool bigTouch = false, bool isUtage = false,
-        SimaiParser.StrictLevelEnum strictLevel = SimaiParser.StrictLevelEnum.Normal)
+        SimaiParser.StrictLevelEnum strictLevel = SimaiParser.StrictLevelEnum.Normal, float first = 0f)
     {
         var (chart, parseAlerts) = new SimaiParser(bigTouch, clockCount, strictLevel).Parse(inote);
+        if (first != 0f)
+        {
+            // &first（秒）：第一小节从音频起点后 first 秒开始。ma2 没有 first 字段
+            // （游戏 calcMsec 里 bar 0 = t=0），把整谱（音符/命令/变速）平移换算的小节数。
+            var measures = (Rational)(decimal)first * (Rational)chart.StartBpm / 240;
+            chart.Shift(measures, chart.StartBpm);
+        }
         PrintAlerts(parseAlerts);
         var (ma2, genAlerts) = new MA2Generator(isUtage).Generate(chart);
         PrintAlerts(genAlerts);
