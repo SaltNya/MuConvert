@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.Text.RegularExpressions;
 using Antlr4.Runtime;
 using Antlr4.Runtime.Misc;
@@ -34,6 +34,20 @@ public partial class SimaiParser : SimaiBaseVisitor<object>, IParser<MaiChart>
     private Rational step = new(1, 4);
     private decimal? absoluteTimeStep; // 此项必须和step本体一起更改
     private Rational extendedFalseEach = 0; // 扩展伪双押语法（多个连续的`）累计后移了多少时间。每次遇到逗号时，这个数字需要清零。
+
+    // 可重叠音符流（@{N}）：流内音符/命令不推进主谱时间，全部叠加在流起点附近。
+    private bool overlapMode; // 当前是否处于重叠流中
+    private Rational overlapBase; // 流起点（主谱时间，多条流共用）
+    private Rational streamOffset; // 流内已推进的偏移
+    private Rational mainStep = new(1, 4); // 进入流之前的主谱步长（流结束后恢复）
+    private int lastUnitLine; // 上一个单元所在的行号（用于判断流是否跨行结束）
+
+    // 当前重叠流内 SV/HS 的"流类型化曲线"输出：每条流分配自增类型键 s1/s2/...，
+    // 流内 <SV*...>/<HS*...> 输出为 `SVSP/HS <bar> <grid> s{N}=<倍率>` 类型化曲线行，
+    // 流内音符行尾附加 `s{N}` 标记字段 —— 游戏端据此把该音符的曲线类型键设为 s{N}，
+    // 只吃本流曲线、与主谱（全局/普通类型）完全隔离。
+    private int streamSeq; // 已分配的流数量（用于生成 s1/s2/...）
+    private string currentStreamId; // 当前流的类型键（如 "s1"）；不在流内时为空
 
     private ParserRuleContext? currContext; // 供调试报错AddAlert函数使用
     private Note? currNote; // 用于在部分visitor之间传递额外的参数，如visitDuration、visitSlideBody等，都需要Note对象作为参数传入的情况
@@ -184,6 +198,18 @@ public partial class SimaiParser : SimaiBaseVisitor<object>, IParser<MaiChart>
     {
         foreach (var notations in context.notations())
         {
+            var line = notations.Start.Line;
+            var isMarker = notations.overlapMarker() is { Length: > 0 }; // 注意：* 循环内的子规则只生成数组版访问器，不能与 null 比较
+            if (overlapMode && !isMarker && line != lastUnitLine)
+            { // 重叠流内遇到新行且不是新流标记 → 主谱行开始，流结束：恢复主谱时间与步长
+                overlapMode = false;
+                now = overlapBase;
+                step = mainStep;
+            }
+            if (overlapMode)
+            { // 重叠流期间：主谱时间不动，音符/命令时刻 = 流起点 + 流内偏移
+                now = isMarker ? overlapBase : overlapBase + streamOffset;
+            }
             VisitNotations(notations);
             if (chart.BpmList.Count == 0) AddDefaultBpm();
             if (extendedFalseEach > 0)
@@ -191,7 +217,15 @@ public partial class SimaiParser : SimaiBaseVisitor<object>, IParser<MaiChart>
                 now -= extendedFalseEach;
                 extendedFalseEach = 0;
             }
-            now = (now + step).CanonicalForm;
+            if (overlapMode)
+            { // 流内：只推进流内偏移（流开始单元也推进一步）
+                streamOffset = (streamOffset + step).CanonicalForm;
+            }
+            else
+            {
+                now = (now + step).CanonicalForm;
+            }
+            lastUnitLine = line;
         }
         return true;
     }
@@ -228,6 +262,18 @@ public partial class SimaiParser : SimaiBaseVisitor<object>, IParser<MaiChart>
             else if (child is P.MetTagContext metTag)
             {
                 VisitMetTag(metTag);
+            }
+            else if (child is P.CommandTagContext commandTag)
+            {
+                VisitCommandTag(commandTag);
+            }
+            else if (child is P.OverlapMarkerContext overlapMarker)
+            {
+                VisitOverlapMarker(overlapMarker);
+            }
+            else if (child is P.WaveTimeSigContext waveTimeSig)
+            {
+                VisitWaveTimeSig(waveTimeSig);
             }
             else
             {
@@ -310,6 +356,68 @@ public partial class SimaiParser : SimaiBaseVisitor<object>, IParser<MaiChart>
         return true;
     }
 
+    public sealed override object VisitOverlapMarker(P.OverlapMarkerContext context)
+    { // 可重叠音符流：@{N} 从当前时间起按 1/N 分拍独立推进，不推进主谱时间
+        if (SubtreeHasException(context)) return false;
+        currContext = context;
+        if (!overlapMode)
+        { // 第一条流：记录流起点与主谱步长（多条连续流共用同一流起点）
+            overlapBase = now;
+            mainStep = step;
+            overlapMode = true;
+        }
+        streamOffset = 0; // 每条流都从流起点重新开始
+        streamSeq++; // 分配流类型键 s1/s2/...（每条流独立曲线，互不延续）
+        currentStreamId = "s" + streamSeq;
+        var text = context.OVERLAP_MARKER().GetText(); // 形如 @{128}
+        var quaver = int.Parse(text.Substring(2, text.Length - 3));
+        step = new Rational(1, quaver);
+        absoluteTimeStep = null;
+        return true;
+    }
+
+    public sealed override object VisitWaveTimeSig(P.WaveTimeSigContext context)
+    { // 波形拍号（@分子/分母）：仅影响编辑器波形强弱拍网格，对ma2输出无影响，忽略。
+        if (SubtreeHasException(context)) return false;
+        currContext = context;
+        return true;
+    }
+
+    /**
+     * 时间轴命令（AquaMai mod）：<SV*2> <SV*tap=2,hold=0.75> <HS*1.2> <BOUNCE*8:1> <SPAWN*1.225> 等。
+     * 命令位于当前时刻，不消耗step。
+     */
+    public sealed override object VisitCommandTag(P.CommandTagContext context)
+    {
+        if (SubtreeHasException(context)) return false;
+        currContext = context;
+        var text = context.COMMAND().GetText(); // "<SV*2>"
+        var inner = text[1..^1];
+        var star = inner.IndexOf('*');
+        if (star <= 0) return true;
+        var kind = inner[..star].ToLowerInvariant();
+        var value = inner[(star + 1)..].Trim();
+        if (overlapMode && kind is "sv" or "hs")
+        { // 重叠流内的 SV/HS 是"流局部"演出：输出为流类型化曲线行（类型键 s{N}=倍率），
+            // 流内音符行尾带 s{N} 标记后只吃本流曲线——不进入全局键，
+            // 不会像全局曲线那样影响流外的后续音符。
+            chart.Commands.Add((now, kind, currentStreamId + "=" + value));
+            return true;
+        }
+        if (kind is "sv" or "hs" or "bounce" or "spawn")
+            chart.Commands.Add((now, kind, value));
+        return true;
+    }
+
+    /// <summary>解析touch区文本（B1/A3/C/C1等）：返回 (区域, 键位号)。键位号1-indexed，C区为0。
+    /// A 区位置就是按键本身（AquaMai 约定：6>A3 按 6>3 处理，转原版slide），返回 ("", key)。</summary>
+    private static (string, int) ParseTouchArea(string text)
+    {
+        if (text.Length >= 2 && int.TryParse(text[1..], out var key) && key >= 1 && key <= 8)
+            return text[0] == 'A' ? ("", key) : (text[..1], key);
+        return (text, 0); // C
+    }
+
     public sealed override object VisitNoteGroup(P.NoteGroupContext context)
     { // 同一时刻出现的（双押，伪双押，同头星星...）构成一个NoteGroup。例如"1/2`3/4"，`1-2*-3[2:1]/4-5*-6[4:1]`都是NoteGroup。
         currContext = context;
@@ -354,6 +462,7 @@ public partial class SimaiParser : SimaiBaseVisitor<object>, IParser<MaiChart>
             foreach (var note in result)
             {
                 note.FalseEachIdx = falseEachIdx;
+                if (overlapMode) note.StreamId = currentStreamId; // 流内音符标记所属流类型键
                 chart.Notes.Add(note);
             }
         }
@@ -424,7 +533,8 @@ public partial class SimaiParser : SimaiBaseVisitor<object>, IParser<MaiChart>
                 if (child is IErrorNode) continue;
                 if (child is not ITerminalNode modifier) throw Utils.Fail("modifiers里面居然不是ITerminalNode");
                 var token = modifier.Symbol;
-                if (token.Text == "b" && !note.IsBreak) note.IsBreak = true;
+                if (token.Text == "m" && !note.IsMine) note.IsMine = true;
+                else if (token.Text == "b" && !note.IsBreak) note.IsBreak = true;
                 else if (token.Text == "x" && !note.IsEx) note.IsEx = true;
                 else if (token.Text == "f" && note is Touch { IsFirework: false } touch) touch.IsFirework = true;
                 else extraModifiers.Add(token);
@@ -561,14 +671,30 @@ public partial class SimaiParser : SimaiBaseVisitor<object>, IParser<MaiChart>
     {
         var slide = (Slide)currNote!;
         
-        Utils.Assert(context.slideType().Length == context.KEY().Length);
+        Utils.Assert(context.slideType().Length == context.KEY().Length + context.TOUCH_AREA().Length);
+        // 依次取本段终点：可能是按键（KEY）也可能是touch区（TOUCH_AREA）
+        var endTokens = (context.children ?? [])
+            .Where(c => c is ITerminalNode t && (t.Symbol.Type == L.KEY || t.Symbol.Type == L.TOUCH_AREA))
+            .Cast<ITerminalNode>()
+            .ToList();
         for (int i = 0; i < context.slideType().Length; i++)
         {
-            var key = int.Parse(context.KEY()[i].GetText());
+            var endText = endTokens[i].GetText();
+            var key = 0;
+            var endArea = "";
+            if (endTokens[i].Symbol.Type == L.TOUCH_AREA)
+            {
+                (endArea, key) = ParseTouchArea(endText);
+            }
+            else
+            {
+                key = int.Parse(endText);
+            }
             var segment = new SlideSegment((Slide)currNote!)
             {
                 Type = SlideTypeTool.FromSimai(context.slideType()[i].GetText(), slide.EndKey, key), // 在新的segment被添加之前，此前的slide部分的EndKey就是新segment的StartKey
-                EndKey = key
+                EndKey = key,
+                EndArea = endArea
             };
             slide.segments.Add(segment);
         }
@@ -632,15 +758,26 @@ public partial class SimaiParser : SimaiBaseVisitor<object>, IParser<MaiChart>
         currContext = context;
         var result = new Slide(chart, now);
         
-        // 处理星星头
-        Tap? head = (Tap)VisitTap(context.tap());
-        if (GetModifier(L.NO_STAR))
-        { // 标记了NO_STAR的星星，则不要放head、但是需要手动设置Key
-            result.Key = head.Key;
-            head = null;
+        if (context.tap() != null)
+        { // 普通按键起点
+            // 处理星星头
+            Tap? head = (Tap)VisitTap(context.tap());
+            if (GetModifier(L.NO_STAR))
+            { // 标记了NO_STAR的星星，则不要放head、但是需要手动设置Key
+                result.Key = head.Key;
+                head = null;
+                result.NoHead = true;
+            }
+            else if (!GetModifier(L.STAR_TO_TAP)) head = new Star(head); // 除非标记了STAR_TO_TAP，否则把tap转为star
+            result.OwnHead = head;
         }
-        else if (!GetModifier(L.STAR_TO_TAP)) head = new Star(head); // 除非标记了STAR_TO_TAP，否则把tap转为star
-        result.OwnHead = head;
+        else
+        { // touch区起点（B1-5这种，AquaMai mod NMSSS）：无普通星头，记录StartArea
+            var headText = context.touchHead().TOUCH_AREA().GetText();
+            (result.StartArea, result.Key) = ParseTouchArea(headText);
+            ApplyModifiers([context.touchHead().modifiers()], result);
+            if (GetModifier(L.NO_STAR)) result.NoHead = true; // touch区起点也可以写?/!去掉touchstar头
+        }
         
         currNote = result;
         VisitSlideBody(context.slideBody());
@@ -654,6 +791,19 @@ public partial class SimaiParser : SimaiBaseVisitor<object>, IParser<MaiChart>
         if (currNote is Slide prevSlide)
         {
             result.SharedHeadWith = prevSlide.SharedHeadWith??prevSlide;
+            result.StartArea = prevSlide.StartArea; // 同头星星继承起点的区域（touch区也继承）
+            // 链段续写（*5-3 带显式起点键）：段起点=该键（合法谱面中=上段终点），供段类型计算/生成器取起点。
+            // 无键的同头（*-6）：起点=星头键（Slide.Key 经 SharedHeadWith 链到树根），此处不设 override。
+            var startKeyTok = context.KEY();       // (KEY | TOUCH_AREA)? 可选 → 单元素访问器，null=缺省
+            var startAreaTok = context.TOUCH_AREA();
+            if (startKeyTok != null || startAreaTok != null)
+            {
+                var startText = startKeyTok != null ? startKeyTok.GetText() : startAreaTok!.GetText();
+                var startKey = startKeyTok != null ? int.Parse(startText) : ParseTouchArea(startText).Item2;
+                if (startKey != prevSlide.EndKey)
+                    AddAlert(Warning, string.Format(Locale.InvalidSlide, $"{startText} (shared-head start {startKey} != previous segment end {prevSlide.EndKey})")); // 仅警告，仍以谱面为准
+                result.startKeyOverride = startKey;
+            }
         }
         else throw Utils.Fail("同头星星，找不到上一条");
         
