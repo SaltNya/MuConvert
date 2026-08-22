@@ -79,6 +79,10 @@ public static class SlideTypeTool
             case 'q': 
                 if (s.Length > 1 && s[1] == 'q') return SlideType.SXR; // qq
                 return SlideType.SUR;
+            case 'r': // rp/rq：反向圆弧，分别沿pp/qq的相反方向绕行。游戏无独立类型，映射为反向的Bend类型（rp≡qq方向、rq≡pp方向）
+                if (s.Length > 1 && s[1] == 'p') return SlideType.SXR; // rp：沿pp相反方向 = Bend_R
+                if (s.Length > 1 && s[1] == 'q') return SlideType.SXL; // rq：沿qq相反方向 = Bend_L
+                throw new ArgumentException(string.Format(Locale.InvalidSlide, $"{startKey}{s}"));
             case 'V':
                 Utils.Assert(startKey != null, "startKey没传进来");
                 if (!int.TryParse(s[1..2], out var midKey)) throw new ArgumentException(string.Format(Locale.InvalidSlide, $"{startKey}{s}"));
